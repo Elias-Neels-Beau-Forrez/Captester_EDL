@@ -1,0 +1,5 @@
+captester/.pio
+captester/.vscode/.browse.c_cpp.db*
+captester/.vscode/c_cpp_properties.json
+captester/.vscode/launch.json
+captester/.vscode/ipch
