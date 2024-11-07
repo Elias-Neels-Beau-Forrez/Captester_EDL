@@ -1,3 +1,4 @@
+
 #ifndef __LCD_H__
 #define __LCD_H__
 
@@ -6,7 +7,7 @@
 
 class LCD{
     public:
-        LCD(uint8_t mcpResetPin=-1, uint8_t mcpAddress=0x20);
+        LCD(uint8_t mcpResetPin=-1, uint8_t mcpAddress=0x27);
         ~LCD();
 
         void begin();
