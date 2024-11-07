@@ -1,14 +1,11 @@
 #include <Arduino.h>
 #include <LCD.h>
 
-#define USER_LED_PIN  9 
-
+#define USER_LED_PIN  9
 #define SW2_PIN       4
 #define SW1_PIN       3
-
 #define OSC_IN_PIN    2
 #define RANGE_SEL_PIN 7
-
 #define MCP_RESET_PIN 8
 
 LCD lcd(MCP_RESET_PIN);
@@ -16,14 +13,14 @@ LCD lcd(MCP_RESET_PIN);
 unsigned long prevOscInt = 0;
 unsigned long oscPeriod;
 
-typedef enum ranges{
+typedef enum ranges {
   range_nF,
   range_uF,
   outOfRange,
   noCap
 } Range_t;
 
-Range_t range = range_nF;
+Range_t range = range_nF;  // Start with nF range by default
 bool autoRange = true;
 volatile bool oscOff = false;
 
@@ -31,234 +28,200 @@ unsigned long updatePeriod = 1000;
 unsigned long prevUpdate;
 int startupCounter = 10;
 
-// set oscillator range
-void setRange(Range_t r){
+// Calibration constants
+const float OSC_CONSTANT = 1.443;  // RC oscillator constant
+const float NF_SCALE = 1.0;      // Scaling factor for nF range
+const float UF_SCALE = 1000.0;   // Scaling factor for µF range
+
+void setRange(Range_t r) {
   range = r;
-  switch (range){
-    case noCap:{
+  switch (range) {
+    case noCap:
+    case range_nF:
       digitalWrite(RANGE_SEL_PIN, LOW);
-    } break;
-
-    case range_nF:{
-      digitalWrite(RANGE_SEL_PIN, LOW);
-    } break;
-
-    case range_uF:{
+      break;
+    case range_uF:
+    case outOfRange:
       digitalWrite(RANGE_SEL_PIN, HIGH);
-    } break;
-    
-    case outOfRange:{
-      digitalWrite(RANGE_SEL_PIN, HIGH);
-    } break;
-
-    default:{
-    } break;
+      break;
   }
 }
 
-// function to compute the capacity from the oscillation period
-float compute_c(){
-  Serial.println(oscPeriod);
-  float c = 1.443*oscPeriod;
-
-  if(range == range_uF){
-    c /= 1000;
-  }
-  else{
-    c /= 100;
+float compute_c() {
+  if (oscPeriod < 20 || oscPeriod > 1000000) {
+    return 0.0;
   }
 
-  if(autoRange){
-    switch (range){
-      case noCap:{
-        if(c > 1) setRange(range_nF);
-      }
+  // Calculate base capacitance value
+  float c = OSC_CONSTANT * oscPeriod;
+  
+  // Apply appropriate scaling factor
+  if (range == range_uF) {
+    c /= UF_SCALE;  // Convert to µF
+  } else {
+    c /= NF_SCALE;  // Convert to nF
+  }
 
-      case range_nF:{
-        if(c < 1) setRange(noCap);
-        if(c >= 1000){
-          setRange(range_uF);
-          c /= 1000;
-        }
-      } break;
-
-      case range_uF:{
-        if(c < 1) {
-          setRange(range_nF);
-          c *= 1000;
-          if(c < 1) setRange(noCap);
-        }
-        else{
-          if(c >= 200) setRange(outOfRange);
-        }
-      } break;
-      
-      case outOfRange:{
-        if(c < 200) setRange(range_uF);
-        if(c < 1) {
-          setRange(range_nF);
-          c *= 1000;
-          if(c < 1) setRange(noCap);
-        }
-      } break;
+  // Auto-ranging logic
+  if (autoRange) {
+    if (c < 0.1) {
+      setRange(noCap);
+    } else if (c > 200 && range == range_uF) {
+      setRange(outOfRange);
     }
   }
-  else{
-    setRange(range_nF);
-  }
 
-#ifdef DEBUG
-  Serial.print("range: ");
-  switch (range){
-    case noCap:{
-      Serial.println(F("No cap"));
-    } break;
-    case range_nF:{
-      Serial.println(F("nF"));
-    } break;
-    case range_uF:{
-      Serial.println(F("µF"));
-    } break;
-    case outOfRange:{
-      Serial.println(F("out of range"));
-    } break;
-    default:{
-    } break;
-  }
-#endif
   return c;
 }
 
-void serialPrintC(float c){
-  switch (range){
-    case noCap:{
-      Serial.println("No cap");
-    } break;
+void displayCapacitance(float c) {
+  static Range_t prevRange = range_nF;
+  char msg[16];
+  lcd.clear();
 
-    case range_nF:{
-      Serial.print(c);
-      Serial.println(" nF");
-    } break;
+  // Check if there's no capacitor inserted or if the reading is out of range
+  if (range == noCap || c < 0.1) {
+    lcd.write("Insert capacitor", 0, 0);
+  } else if (range == outOfRange) {
+    lcd.write("Out of range", 0, 0);
+  } else {
+    // Apply hysteresis to maintain stable display of the lowest unit
+    if (c >= 1000.0 && (prevRange == range_nF || range == range_nF)) {
+      // Switch to µF if capacitance is 1000 nF or more
+      c /= 1000.0;  // Convert to µF
+      range = range_uF;  // Change range to µF
+      prevRange = range_uF;
+    } else if (c < 1.0 && (prevRange == range_uF || range == range_uF)) {
+      // Switch back to nF if capacitance falls below 1 µF
+      c *= 1000.0;  // Convert back to nF
+      range = range_nF;  // Change range to nF
+      prevRange = range_nF;
+    } else {
+      prevRange = range;
+    }
 
-    case range_uF:{
-      Serial.print(c);
-      Serial.println(" µF");
-    } break;
-    
-    case outOfRange:{
-      Serial.println("Out of range");
-    } break;
+    // Format the capacitance with appropriate precision
+    if (c >= 100) {
+      dtostrf(c, 6, 1, msg);  // 1 decimal place for values >= 100
+    } else if (c >= 10) {
+      dtostrf(c, 6, 2, msg);  // 2 decimal places for values >= 10
+    } else {
+      dtostrf(c, 6, 3, msg);  // 3 decimal places for values < 10
+    }
 
-    default:{
-    } break;
+    // Trim leading spaces
+    char *ptr = msg;
+    while (*ptr == ' ') ptr++;
+
+    // Add appropriate units based on the current range
+    strcat(ptr, (range == range_nF) ? " nF" : " uF");
+    lcd.write(ptr, 0, 0);
   }
 }
 
-// oscillator interrupt isr
-void osc_int(void){
+void osc_int() {
   noInterrupts();
-  EIFR = bit(INTF0);     //clear interrupt flag
+  EIFR = bit(INTF0);
   unsigned long now = micros();
-  oscPeriod = (unsigned long) now - prevOscInt;
+  oscPeriod = now - prevOscInt;
   prevOscInt = now;
-  if(oscPeriod<20){
+  
+  if (oscPeriod < 20 || oscPeriod > 1000000) {
     oscOff = true;
     detachInterrupt(digitalPinToInterrupt(OSC_IN_PIN));
   }
-  else{
-    interrupts();
-  }
+  interrupts();
 }
 
 void setup() {
   Serial.begin(115200);
-  Serial.println(F("Setup..."));
-
-  // IO setup
+  Serial.println(F("Capacitor Tester Starting..."));
+  
   pinMode(SW1_PIN, INPUT);
   pinMode(SW2_PIN, INPUT);
   pinMode(USER_LED_PIN, OUTPUT);
+  pinMode(OSC_IN_PIN, INPUT);
+  pinMode(RANGE_SEL_PIN, OUTPUT);
+  
   digitalWrite(USER_LED_PIN, HIGH);
 
-  // display setup
   lcd.begin();
   lcd.setBacklight(true);
-
-  // oscillator setup
-  prevOscInt = micros();
-  pinMode(OSC_IN_PIN, INPUT);
-  attachInterrupt(digitalPinToInterrupt(OSC_IN_PIN), &osc_int, RISING);
-
-  pinMode(RANGE_SEL_PIN, OUTPUT);
-  setRange(range_uF);
-
-  pinMode(SW2_PIN, INPUT);
-
+  lcd.clear();
   lcd.write("Starting ", 0, 0);
-  prevUpdate = millis();      
 
-  compute_c();
-  while((startupCounter--) > 0){
+  // Initialize oscillator
+  prevOscInt = micros();
+  attachInterrupt(digitalPinToInterrupt(OSC_IN_PIN), osc_int, RISING);
+  setRange(range_nF);
+
+  // Startup calibration
+  prevUpdate = millis();
+  while (startupCounter > 0) {
     lcd.write(".");
     float c = compute_c();
-    if(c > 1){
-      startupCounter = 0;
-      Serial.print("break: ");
-      Serial.println(c);
+    if (c > 0.1) {
+      break;
     }
     EIFR = bit(INTF0);
-    attachInterrupt(digitalPinToInterrupt(OSC_IN_PIN), &osc_int, RISING);
+    attachInterrupt(digitalPinToInterrupt(OSC_IN_PIN), osc_int, RISING);
     interrupts();
     oscOff = false;
-    delay(1000);
+    delay(500);
+    startupCounter--;
   }
 
-
   digitalWrite(USER_LED_PIN, LOW);
-  Serial.println(F("Done"));
+  Serial.println(F("Ready"));
 }
 
 void loop() {
-  // update display every "updatePeriod" ms
   unsigned long now = millis();
-  if(now > prevUpdate + updatePeriod){
+  
+  if (now - prevUpdate >= updatePeriod) {
     prevUpdate = now;
-
-    float c = compute_c();
-    serialPrintC(c);
-
-    char msg[16];
-    uint16_t val1 = floor(c);
-    uint16_t val2 = ((uint16_t)floor(c*10)) % 10;
-    if(range == range_nF){
-      sprintf(msg, "%d.%d nF", val1, val2);
-    }
-    if(range == range_uF){
-      sprintf(msg, "%d.%d uF", val1, val2);
-    }
-    lcd.clear();
-    lcd.write(msg, 0, 0);
-  }
-
-  // oscillator interrupts turned of because when no cap is present, osc freq. is to high
-  if(oscOff){
-      oscOff = false;
-      Serial.println("osc off");
-      char msg[] = "Insert capacitor";
+    
+    if (oscOff || oscPeriod < 20 || oscPeriod > 1000000) {
       lcd.clear();
-      lcd.write(msg, 0, 0);
-
-      // let's try again
-      delay(1000);
+      lcd.write("Insert capacitor", 0, 0);
+      delay(500);
+      
+      // Reset oscillator
+      oscOff = false;
       EIFR = bit(INTF0);
-      attachInterrupt(digitalPinToInterrupt(OSC_IN_PIN), &osc_int, RISING);
+      attachInterrupt(digitalPinToInterrupt(OSC_IN_PIN), osc_int, RISING);
       interrupts();
-      prevOscInt = micros()-100;
+      prevOscInt = micros();
+    } else {
+      float c = compute_c();
+      displayCapacitance(c);
+      
+      // Debug output
+      Serial.print("Period: ");
+      Serial.print(oscPeriod);
+      Serial.print("us, Cap: ");
+      Serial.print(c);
+      Serial.println((range == range_nF) ? " nF" : " uF");
+    }
   }
 
-  if(digitalRead(SW2_PIN) == LOW){
-    if(lcd.getBacklight()) lcd.setBacklight(false);
-    else lcd.setBacklight(true);
-    delay(500);
+  // Handle oscillator recovery
+  if (oscOff) {
+    Serial.println("Oscillator reset");
+    lcd.clear();
+    lcd.write("Insert capacitor", 0, 0);
+    delay(1000);
+    
+    oscOff = false;
+    EIFR = bit(INTF0);
+    attachInterrupt(digitalPinToInterrupt(OSC_IN_PIN), osc_int, RISING);
+    interrupts();
+    prevOscInt = micros();
+  }
+
+  // Backlight control
+  if (digitalRead(SW2_PIN) == LOW) {
+    lcd.setBacklight(!lcd.getBacklight());
+    delay(500);  // Debounce
   }
 }
