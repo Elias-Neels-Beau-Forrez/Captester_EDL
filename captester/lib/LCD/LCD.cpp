@@ -3,7 +3,7 @@
 #define RnW_PIN         9
 #define RS_PIN          10
 #define BACKLIGHT_PIN   11
-#define E_PIN           12
+#define E_PIN           8
 
 #define CMD_CLEAR       0x01
 #define CMD_HOME        0x02
